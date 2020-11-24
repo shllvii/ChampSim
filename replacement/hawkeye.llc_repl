@@ -1,0 +1,314 @@
+/* -------------------------------------------------
+ * Header
+ */
+
+#include "cache.h"
+
+#include <map>
+#include <math.h>
+#include <vector>
+
+using namespace std;
+
+#define OPTGEN_SIZE 128
+#define MAX_PCMAP 31
+#define PCMAP_SIZE 2048
+#define NUM_CORE 1
+#define MAXRRIP 7
+#define SAMPLER_ENTRIES 2800
+#define SAMPLER_HIST 8
+#define SAMPLER_SETS (SAMPLER_ENTRIES/SAMPLER_HIST)
+#define TIMER_SIZE 1024
+#define bitmask(l) (((l) == 64)? (unsigned long long)(-1LL) : ((1LL<<(l)) - 1LL))
+#define bits(x, i, l) (((x) >> (i)) & bitmask(l))
+#define SAMPLED_SET(set) (bits(set, 0 , 6) == bits(set, ((unsigned long long)log2(LLC_SET) - 6), 6) )
+
+/* -------------------------------------------------
+ * Helper functions
+ */
+ 
+uint64_t CRC(uint64_t address) {
+    unsigned long long crcPolynomial = 3988292384ULL;
+    unsigned long long result = address;
+    for (unsigned int i=0; i<32; i++) {
+        if ((result & 1) == 1) {
+            result = (result >> 1) ^ crcPolynomial;
+        } else {
+            result >>= 1;
+        }
+    }
+    return result;
+}
+            
+struct HISTORY {
+    uint64_t address;
+    uint64_t PCval;
+    uint32_t previousVal;
+    uint32_t lru;
+    
+    void init() {
+        PCval = 0;
+        previousVal = 1;
+        lru = 0;
+    }
+
+    void update(unsigned int currentVal, uint64_t PC) {
+        previousVal = currentVal;
+        PCval = PC;
+    }
+};
+
+/* -------------------------------------------------
+ * OPTgen
+ */
+
+struct OPTgen {
+    vector<unsigned int> liveness;
+    uint64_t num_cache;
+    uint64_t access;
+    uint64_t cache_size;
+
+    void init(uint64_t size) {
+        num_cache = 0;
+        access = 0;
+        cache_size = size;
+        liveness.resize(OPTGEN_SIZE, 0);
+    }
+    uint64_t get_optgen_hits() {
+        return num_cache;
+    }
+    void set_access(uint64_t val) {
+        access ++;
+        liveness[val] = 0;
+    }
+    bool is_cache(uint64_t val, uint64_t endVal) {
+        bool cache = true;
+        unsigned int count = endVal;
+        while (count != val) {
+            if (liveness[count] >= cache_size) {
+                cache = false;
+                break;
+            }
+            count = (count + 1) % liveness.size();
+        }
+        if (cache) {
+            count = endVal;
+            while (count != val) {
+                liveness[count] += 1;
+                count = (count + 1) % liveness.size();
+            }
+            num_cache += 1;
+        }
+
+        return cache;
+    }
+};
+
+
+/* -------------------------------------------------
+ * Predictor
+ */
+
+
+class Predictor {
+private:
+    map<uint64_t, int> PC_Map;
+public:
+    bool get_prediction(uint64_t PC) {
+        uint64_t result = CRC(PC) % PCMAP_SIZE;
+        if (PC_Map.find(result) != PC_Map.end() && PC_Map[result] < ((MAX_PCMAP+1) / 2)) {
+            return false;
+        }
+        else return true;
+    }
+    void increase(uint64_t PC) {
+        uint64_t result = CRC(PC) % PCMAP_SIZE;
+        if (PC_Map.find(result) == PC_Map.end()) {
+            PC_Map[result] = (MAX_PCMAP+1) / 2;
+        } 
+        if (PC_Map[result] < MAX_PCMAP) { 
+            PC_Map[result] = PC_Map[result] + 1;
+        } else {
+            PC_Map[result] = MAX_PCMAP;
+        }
+    }
+
+    void decrease(uint64_t PC) {
+        uint64_t result = CRC(PC) % PCMAP_SIZE;
+		if(PC_Map.find(result) == PC_Map.end()){
+			PC_Map[result] = (MAX_PCMAP + 1)/2;
+		}
+		if(PC_Map[result] != 0){
+			PC_Map[result] = PC_Map[result] - 1;
+		}
+    }
+};
+
+
+/* -------------------------------------------------
+ * Replacement Strategy
+ */
+
+uint32_t rrip[LLC_SET][LLC_WAY];
+
+Predictor* predictor;
+OPTgen occupy_vector[LLC_SET];
+
+vector<map<uint64_t, HISTORY> > history;
+
+uint64_t signature[LLC_SET][LLC_WAY];
+
+uint64_t timer[LLC_SET];
+
+
+void CACHE::llc_initialize_replacement() {
+    cout << "Initialize Hawkeye replacement policy state" << endl;
+
+    for (int i=0; i<LLC_SET; i++) {
+        for (int j=0; j<LLC_WAY; j++) {
+            rrip[i][j] = MAXRRIP;
+            signature[i][j] = 0;
+        }
+        timer[i] = 0;
+        occupy_vector[i].init(LLC_WAY - 2);
+    }
+
+    history.resize(SAMPLER_SETS);
+    for (int i=0; i<SAMPLER_SETS; i++) {
+        history[i].clear();
+    }
+
+    predictor = new Predictor();
+
+    cout << "Finished initializing Hawkeye replacement policy state" << endl;
+}
+
+
+uint32_t CACHE::llc_find_victim(uint32_t cpu, uint64_t instr_id, uint32_t set, const BLOCK *current_set, uint64_t ip, uint64_t full_addr, uint32_t type) {
+
+    for (uint32_t i=0; i<LLC_WAY; i++) {
+        if (rrip[set][i] == MAXRRIP) {
+            return i;
+        }
+    }
+
+    uint32_t max_rrpv = 0;
+    int32_t victim = -1;
+    for (uint32_t i=0; i<LLC_WAY; i++) {
+        if (rrip[set][i] >= max_rrpv) {
+            max_rrpv = rrip[set][i];
+            victim = i;
+        }
+    }
+
+    if (SAMPLED_SET(set)) {
+        predictor->decrease(signature[set][victim]);
+    }
+
+    return victim;
+
+}
+
+
+void update_history(unsigned int sample_set, unsigned int currentVal) {
+    for (map<uint64_t, HISTORY>::iterator it = history[sample_set].begin(); it != history[sample_set].end(); it ++) {
+        if ((it->second).lru < currentVal) {
+            (it->second).lru ++ ;
+        }
+    }
+}
+
+
+void CACHE::llc_update_replacement_state(uint32_t cpu, uint32_t set, uint32_t way, uint64_t full_addr, uint64_t ip, uint64_t victim_addr, uint32_t type, uint8_t hit)
+{
+    full_addr = (full_addr >> 6) << 6;
+
+    if (type == WRITEBACK) {
+        return;
+    }
+
+    if (SAMPLED_SET(set)) {
+        uint64_t currentVal = timer[set] % OPTGEN_SIZE;
+        uint64_t sample_tag = CRC(full_addr >> 12) % 256;
+        uint32_t sample_set = (full_addr >> 6) % SAMPLER_SETS;
+
+        if ((type != PREFETCH) && (history[sample_set].find(sample_tag) != history[sample_set].end())) {
+            unsigned int current_time = timer[set];
+            if (current_time < history[sample_set][sample_tag].previousVal) {
+                current_time += TIMER_SIZE;
+            }
+            uint64_t previousVal = history[sample_set][sample_tag].previousVal % OPTGEN_SIZE;
+            bool isWrap = (current_time - history[sample_set][sample_tag].previousVal) > OPTGEN_SIZE;
+
+            if (!isWrap && occupy_vector[set].is_cache(currentVal, previousVal)) {
+                predictor->increase(history[sample_set][sample_tag].PCval);
+            } else {
+                predictor->decrease(history[sample_set][sample_tag].PCval);
+            }
+            occupy_vector[set].set_access(currentVal);
+            update_history(sample_set, history[sample_set][sample_tag].lru);
+        }
+
+        else if (history[sample_set].find(sample_tag) == history[sample_set].end()) {
+            if (history[sample_set].size() == SAMPLER_HIST) {
+                uint64_t addr_val = 0;
+                for (map<uint64_t, HISTORY>::iterator it = history[sample_set].begin(); it != history[sample_set].end(); it++) {
+                    if ((it->second).lru == (SAMPLER_HIST-1)) {
+                        addr_val = it->first;
+                        break;
+                    }
+                }
+                history[sample_set].erase(addr_val);
+            }
+            history[sample_set][sample_tag].init();
+            occupy_vector[set].set_access(currentVal);
+            update_history(sample_set, SAMPLER_HIST-1);
+        }
+        else {
+            cout << "Prefetch line: Ignored" << endl;
+        }
+
+        history[sample_set][sample_tag].update(timer[set], ip);
+        history[sample_set][sample_tag].lru = 0;
+        timer[set] = (timer[set] + 1) % TIMER_SIZE;
+    }
+
+    bool prediction = predictor->get_prediction(ip);
+    signature[set][way] = ip;
+
+    if (!prediction) {
+        rrip[set][way] = MAXRRIP;
+    } else {
+        rrip[set][way] = 0;
+        if (!hit) {
+            bool isMaxVal = false;
+            for(uint32_t i=0; i<LLC_WAY; i++) {
+                if (rrip[set][i] == MAXRRIP-1) {
+                    isMaxVal = true;
+                }
+            }
+            for (uint32_t i=0; i<LLC_WAY; i++) {
+                if (!isMaxVal && rrip[set][i] < MAXRRIP - 1) {
+                    rrip[set][i] ++ ;
+                }
+            }
+        }
+        rrip[set][way] = 0;
+    }
+
+}
+
+void CACHE::llc_replacement_final_stats()
+{
+    int hits = 0;
+    int access = 0;
+    for (int i=0 ;i<LLC_SET; i++) {
+        hits += occupy_vector[i].get_optgen_hits();
+        access += occupy_vector[i].access;
+    }
+
+    cout << "Final OPTGen Hits: " << hits << endl;
+    cout << "Final OPTGen Access: " << access << endl;
+    cout << "Final OPTGen Hit Rate: " << 100 * ((double) hits/ (double)access) << endl;
+}
+
