@@ -7,5 +7,9 @@ replacement/llc_replacement.cc
 
 inc/champsim.h.bak
 
+results_1core/
+results_4core/
+crc2_traces/
+
 bin/
 obj/

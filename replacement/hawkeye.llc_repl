@@ -13,7 +13,6 @@ using namespace std;
 #define OPTGEN_SIZE 128
 #define MAX_PCMAP 31
 #define PCMAP_SIZE 2048
-#define NUM_CORE 1
 #define MAXRRIP 7
 #define SAMPLER_ENTRIES 2800
 #define SAMPLER_HIST 8

@@ -6,7 +6,7 @@ if [ "$#" -lt 8 ] || [ "$#" -gt 9 ]; then
     exit 1
 fi
 
-TRACE_DIR=$PWD/dpc3_traces
+TRACE_DIR=$PWD/crc2_traces
 BINARY=${1}
 N_WARM=${2}
 N_SIM=${3}
@@ -60,5 +60,5 @@ if [ ! -f "$TRACE_DIR/$TRACE3" ] ; then
     exit 1
 fi
 
-mkdir -p results_4core_${N_SIM}M
-(./bin/${BINARY} -warmup_instructions ${N_WARM}000000 -simulation_instructions ${N_SIM}000000 ${OPTION} -traces ${TRACE_DIR}/${TRACE0} ${TRACE_DIR}/${TRACE1} ${TRACE_DIR}/${TRACE2} ${TRACE_DIR}/${TRACE3}) &> results_4core_${N_SIM}M/mix${N_MIX}-${BINARY}${OPTION}.txt
+mkdir -p results_4core
+(./bin/${BINARY} -warmup_instructions ${N_WARM}000000 -simulation_instructions ${N_SIM}000000 ${OPTION} -traces ${TRACE_DIR}/${TRACE0} ${TRACE_DIR}/${TRACE1} ${TRACE_DIR}/${TRACE2} ${TRACE_DIR}/${TRACE3}) &> results_4core/mix${N_MIX}-${BINARY}${OPTION}.txt
